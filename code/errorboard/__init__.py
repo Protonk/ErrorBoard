@@ -4,6 +4,7 @@ from .dataset import (
     natural_distribution_weights,
     per_regime_eval_loaders,
 )
+from .model import GPT, GPTConfig, RMSNorm
 from .oracle import NAN_BITS, add, decode, encode
 from .preprocess import (
     TABLE_DTYPE,
@@ -69,4 +70,6 @@ __all__ = [
     # dataset
     "StratifiedSampler", "EvalBatcher", "per_regime_eval_loaders",
     "natural_distribution_weights",
+    # model
+    "GPT", "GPTConfig", "RMSNorm",
 ]
