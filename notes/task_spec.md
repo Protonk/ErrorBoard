@@ -54,7 +54,7 @@ Each sample receives exactly one primary regime label by first-match in this ord
 |---|---------------------|-----------------------------------------------------------------------|
 | 1 | special-values      | `isnan(a) or isnan(b) or (iszero(a) and iszero(b))`                   |
 | 2 | overflow            | `abs(true_sum) > 448`                                                 |
-| 3 | underflow-to-zero   | `0 < abs(true_sum) < 2**-10`                                          |
+| 3 | underflow-to-zero   | `0 < abs(true_sum) < 2**-10`  *(structurally empty in FP8 E4M3 — see §5)* |
 | 4 | subnormal-result    | `round_to_fp8(true_sum)` has biased exponent `== 0` and is nonzero    |
 | 5 | cancellation        | `sign(a) != sign(b) and abs(true_sum) <= max(abs(a), abs(b)) / 4`     |
 | 6 | rounding-tie        | `true_sum` is the exact midpoint of two adjacent FP8 representables   |
@@ -127,3 +127,20 @@ The full input space is 65,536 ordered FP8 pairs — enumerable, so we design sa
 ### No curriculum
 
 Equal mass per regime throughout training. A curriculum would convolve capability-emergence dynamics with the schedule and obscure when each capability turned on.
+
+### Empty regimes (structural)
+
+Enumeration (2026-05-11) found that **underflow-to-zero** has zero pairs in FP8 E4M3. All E4M3 values are integer multiples of `2⁻⁹` (the smallest subnormal spacing), so any pairwise sum is also an integer multiple of `2⁻⁹`. The open interval `(0, 2⁻¹⁰)` is therefore unreachable: any nonzero sum has `|x| ≥ 2⁻⁹ > 2⁻¹⁰`. The predicate remains in the priority list for completeness, but the regime is empty and is skipped during sampling. Equal-mass weighting is therefore over the seven active regimes.
+
+Full enumeration counts (out of 65,536):
+
+| regime              | count  | share   |
+|---------------------|-------:|--------:|
+| special-values      |  1,024 |  1.56%  |
+| overflow            |    836 |  1.28%  |
+| underflow-to-zero   |      0 |  0.00%  |
+| subnormal-result    |    590 |  0.90%  |
+| cancellation        |  1,440 |  2.20%  |
+| rounding-tie        |  6,100 |  9.31%  |
+| large-Δexp          | 37,540 | 57.28%  |
+| default             | 18,006 | 27.47%  |
