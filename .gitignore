@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtualenv
+.venv/
+
+# External clones (referenced upstream, not vendored)
+code/nanoGPT/
+code/bittokens-ref/
+
+# Training outputs (checkpoints, logs, metrics)
+runs/
+
+# OS junk
+.DS_Store

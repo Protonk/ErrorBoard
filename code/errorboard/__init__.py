@@ -6,6 +6,7 @@ from .dataset import (
 )
 from .model import GPT, GPTConfig, RMSNorm
 from .oracle import NAN_BITS, add, decode, encode
+from .training import TrainingConfig, train
 from .preprocess import (
     TABLE_DTYPE,
     TABLE_SIZE,
@@ -72,4 +73,6 @@ __all__ = [
     "natural_distribution_weights",
     # model
     "GPT", "GPTConfig", "RMSNorm",
+    # training
+    "TrainingConfig", "train",
 ]
