@@ -10,6 +10,7 @@ __pycache__/
 # External clones (referenced upstream, not vendored)
 code/nanoGPT/
 code/bittokens-ref/
+code/fone-ref/
 
 # Training outputs (checkpoints, logs, metrics)
 runs/
