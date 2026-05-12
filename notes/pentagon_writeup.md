@@ -97,10 +97,31 @@ Three readings:
 
 **One additional finding from the slice:** c:m0 → b:m0 attention *grows* with Δexp at V4 (0.076 at Δexp=0 → 0.103 at Δexp≥8). For large Δexp, the result's m0 is dominated by the larger-magnitude operand — so this could be a "magnitude-comparison and copy" circuit for the large-Δexp case, separate from the alignment-rounding circuit for small Δexp. Two distinct sub-circuits within c:m0 prediction. Speculative; held lightly.
 
-**What's still open after the slice:**
+### Subnormal-result slice — H2 falsified
 
-- **H2 (subnormal renormalization)** wasn't tested — we filtered subnormals out. A separate slice stratifying by `is_subnormal_result` would address it. The pentagon's m0 cos-sim divergence is averaged across both normal-result and subnormal-result doubling cases; H2 could account for some of the divergence independent of H1.
-- **The vertex-wide ratio increase** (V1 → V4 at every Δexp) is broader than the H1 shape and may reflect a generic LSB-is-hard effect (H3) running in parallel with H1. The two aren't mutually exclusive.
+The H2 hypothesis (subnormal renormalization contributes to the m0 anomaly) is tested by the second slice (`code/errorboard/m0_subnormal.py`, results in `notes/m0_subnormal_findings.md`). Stratify holdout into normal-result and subnormal-result strata (excluding NaN-result, overflow-result, zero-result), re-run the c:m0 attention breakdown on each, and compare.
+
+c:m0 attention ratio difference, subnormal-result minus normal-result, per vertex:
+
+| stratum | V1 | V2 | V3 | V4 | V5 |
+|---------|---:|---:|---:|---:|---:|
+| Δ ratio (sub − norm) | +0.00 | −0.01 | **−0.04** | **−0.06** | +0.08 |
+
+**H2 is falsified as a positive contributor.** Subnormal-result cases at V3 and V4 have *slightly lower* m1/m0 ratios than normal-result cases, not higher. The model uses essentially the same H1-style alignment-rounding attention pattern for both strata; there is no separate "subnormal renormalization circuit" producing additional m1 attention.
+
+In absolute terms at V4: normal-result ratio is 0.75, subnormal-result ratio is 0.70 — both elevated relative to V1's ~0.41 by the same vertex-wide trend, with subnormal-result slightly *less* elevated than normal-result.
+
+**The pre-probe prediction was directionally wrong.** Expectation was +0.10-0.20 boost for subnormal-result; actual was -0.04 to -0.06. The mistake: I assumed subnormal renormalization would route operand m1 info into result m0 via the leftward shift, and that the model would mirror this in attention. But most subnormal-result cases in holdout are cancellation-induced (close-magnitude operands subtracting), not doubling-like cases where the mantissa shift cleanly maps m1 to the result m0 slot. The qualitative reading ("H1 dominates, H2 small") still holds; the magnitude estimate was wrong.
+
+### Final reading on the m0 anomaly
+
+After both slices, the picture is:
+
+- **H1 (alignment-rounding) at small Δexp** — substantively supported. Specifically: at V4, the m1/m0 ratio peaks at Δexp=1-3 (0.82-0.84) and drops at Δexp≥4 (0.67-0.69), matching the structural prediction that operand m1 contributes to result m0 only when alignment shifts are small enough to keep m1 in the LSB neighborhood.
+- **H2 (subnormal renormalization)** — falsified. Slightly negative effect, not positive. Subnormal-result cases use the same H1-style circuit as normal-result cases; no separate subnormal pathway is visible at the attention level.
+- **H3 (generic LSB-is-hardest)** — likely partial contributor. The vertex-wide ratio increase (V1 → V4 at every Δexp and every stratum) is broader than H1 alone and reads as a vertex-capability effect on top of H1. Not directly tested in either slice, but plausibly the remaining background.
+
+The m0 cos-sim anomaly is best read as: **H1 + a small H3 background, with H2 not contributing.** Held lightly — neither H1 nor H3 has been validated with causal ablations, only with attention-pattern measurements that are *consistent with* the named mechanisms.
 
 **Original wrong reading, left for the record.** In FP8 addition, the result's m0 (LSB) is determined by rounding, which uses bits *below* the operand m0 (guard/round/sticky). For doubling (`a + a = 2a`), I claimed the result's m0 is determined by the operand's m1 — not its m0. This is wrong for normal-normal doubling (result mantissa = operand mantissa; only the exponent bumps).
 
@@ -176,6 +197,211 @@ V3 is "algorithm forming, just shy of completion" — V4 shows where V3 is headi
 
 ---
 
+## Finding 6 — fit vs structure: the joint-system reading
+
+Two probes (`code/errorboard/fit_trajectory.py`, `code/errorboard/fit_errors.py`) test whether the model's behavior reflects training-distribution density (fit) or algorithmic structure. Both push toward the structural side, with density playing a modulating but non-dominant role.
+
+### Probe 1 — saturation order vs per-pair density
+
+`StratifiedSampler` gives equal mass to each active regime, so per-pair training density varies inversely with regime size. We can rank regimes both by density (smallest regime = highest density) and by saturation iter on the V1→V3 trajectory.
+
+| regime | per-pair density rank | saturation rank | Δ |
+|--------|----------------------:|----------------:|--:|
+| special-values | 3 | 1 | −2 |
+| overflow | 2 | 2 | 0 |
+| subnormal-result | 1 | 4 | **+3** |
+| cancellation | 4 | 5 | +1 |
+| rounding-tie | 5 | 6 | +1 |
+| large-dexp | 7 | 3 | **−4** |
+| default | 6 | 7 | +1 |
+
+Spearman ρ between density rank and saturation rank: **+0.43** — positive but modest.
+
+The two notable inversions:
+- **`subnormal-result`** has rank 1 density (highest per-pair sampling) but rank 4 saturation. Structural difficulty beat density.
+- **`large-dexp`** has rank 7 density (lowest) but rank 3 saturation. Structural simplicity ("copy the larger operand") beat density.
+
+### Probe 2 — V4 residual error stratification
+
+V4 (L4-E128 seed 0, iter 20000) has 63 errors / 6554 holdout = 99.04% all-bits-correct. Where do those errors land?
+
+By regime (with per-pair density for reference):
+
+| regime | density | error rate |
+|--------|--------:|-----------:|
+| special-values | 397 | 0.0% |
+| overflow | 486 | 0.0% |
+| subnormal-result | **689** | **5.1%** |
+| cancellation | 282 | 0.0% |
+| rounding-tie | 67 | 0.66% |
+| large-dexp | 11 | 0.29% |
+| default | 23 | 2.5% |
+
+Subnormal-result has the highest per-pair density and the highest error rate. Large-dexp has the lowest density and a low error rate. Density does not predict the error structure.
+
+Orthogonal stratifications make the structural pattern even cleaner:
+
+| Δexp | error rate |
+|-----:|-----------:|
+| 0-3 | 1.6–2.2% |
+| 4-7 | 0.46% |
+| 8+ | 0.06% |
+
+| max magnitude | error rate |
+|---------------|-----------:|
+| subnormal | 7.3% |
+| very small (e≤-3) | 4.6% |
+| small (e=-2..0) | 0.81% |
+| medium (e=1..3) | 0.91% |
+| large (e=4..6) | 0.32% |
+| largest (e=7-8) | 0.14% |
+
+| subnormal involvement | error rate |
+|-----------------------|-----------:|
+| neither | 0.65% |
+| operand subnormal | 3.4% |
+| both ops + result subnormal | 6.25% |
+
+Errors concentrate at small Δexp (alignment-rounding regime), small magnitudes (precision-constrained regime), and subnormal involvement (algorithmic-rules-change regime). None of these correlate with training density; they correlate with where IEEE-754 itself put the most procedural complexity.
+
+### The joint-system reading
+
+We considered a "yolo abstraction" framing: the FP8 model treats subnormals like normals because the training distribution rewards it. Both probes undercut that framing as the primary explanation. The model's behavior is structurally aligned with the FP8 algorithm's intrinsic difficulty, with training density modulating *how far the structural fit extends*, not the *shape* of what gets fit.
+
+The honest framing we settled on:
+
+> The joint system (architecture + training + format + regime balance) settled into an error shape that's not predicted by training distribution density alone. The shape correlates with where the FP8 algorithm is structurally hardest: subnormal arithmetic, small alignment shifts, small-magnitude precision, and rounding-bit propagation. We don't know how much of that shape is set by the architecture vs the training process vs the format itself, only that it's not set by data quantity.
+
+This is weaker than "the architecture has partially subsumed the error" — that stronger claim is consistent with the data but not isolated by it. The architecture is a permissive substrate through which the training process carved a particular error shape; we'd need a comparative experiment to attribute the shape to architecture specifically.
+
+**A stronger claim that's loosely supported and worth recording:** the errors land where IEEE-754 spent the most standardization effort — gradual underflow, subnormal handling, rounding-bit logic, ties-to-even. These are exactly the operations that don't have natural analogues in attention-MLP primitives. The model handles "natural" arithmetic operations cleanly and accumulates error where the algorithm requires explicit case-by-case standardized reasoning. This sits naturally inside Park's expressivity framing: FP transformers can't represent all FP functions, and what they can represent is bounded by their substrate.
+
+### Partial isolation: depth shapes the error shape (L4 vs L1)
+
+We re-ran Probe 2 on V5 (L1-E128, iter 20k) to check whether L=1's stall reflects "the same algorithm with less capacity" or a fundamentally different failure profile. Same task, same training schedule, same data, same width (E=128) as V4 — only depth differs.
+
+V4 overall error rate: 0.96%. V5 overall error rate: 15.58% (16× higher). But the *shape* of errors differs qualitatively:
+
+| axis | V4 spread (min..max) | V5 spread (min..max) |
+|------|----------------------|----------------------|
+| magnitude | 0.14% (largest) .. 7.3% (subnormal) — **50× range** | 9.7% (largest) .. 39.0% (very small) — **4× range** |
+| subnormal involvement | 0.65% (neither) .. 6.25% (both) | 16.4% (neither) .. 25% (both) |
+| Δexp | 0.06% (8+) .. 2.2% (2) — 37× range | 0.22% (8+) .. 44.5% (1) — 200× range |
+
+Three observations:
+
+1. **V4 has a structurally-selective error shape; V5 does not.** V4's magnitude-error spread is 50× (errors cluster at small magnitudes); V5's is 4× (errors roughly uniform across magnitudes). The L=1 architecture cannot produce the structurally-aligned concentration that L=4 produces.
+
+2. **The subnormal-involvement direction is partially reversed.** V4 finds subnormal-touching cases *harder* than neither-subnormal cases (3.4% vs 0.65%). V5 finds subnormal-touching cases *easier* than neither-subnormal cases (10.6% vs 16.4%). V5 doesn't specifically struggle with subnormals because it doesn't specifically *succeed* at non-subnormals.
+
+3. **V5's failure concentrates on the heterogeneous `default` regime (43% error) while large-dexp stays manageable (3.7%).** Large-dexp reduces to "copy the larger operand" — a one-step operation L=1 can do. Default requires the full multi-stage pipeline; L=1 can't compose stages, and the regime collapses.
+
+The reading: V5 isn't "V4 minus polish." V5 implements a fundamentally different — flatter, less structurally-aware — algorithm whose failure mode is the absence of stage composition, not the imprecision of multi-stage execution.
+
+**This isolates depth as one architectural axis that shapes the error shape.** Same training, same data, same width — but the error shape's structural alignment moves with depth. The architecture is doing real work in producing the *shape* of errors at L=4, not just the rate.
+
+Caveat: this isolates *depth specifically*, not "architecture" broadly. We've varied one architectural axis (n_layer) within the same family (Llama-style RMSNorm pre-norm, SiLU MLP, learned-PE). The broader claim "architecture shapes error" is partly demonstrated for the depth axis but not yet for positional encoding, activation function, or normalization choices.
+
+### Severity, not frequency — where ε's shape actually surfaces
+
+The ε-trace experiment (`code/errorboard/epsilon_trace.py`) measured the *frequency* of error per result-mantissa bin and got Pearson(ε, error_rate) ≈ −0.2 to −0.35 across vertices — modest anti-correlation. Frequency turns out not to be where ε shows up. The follow-up severity experiment (`code/errorboard/epsilon_severity.py`) measures damage when wrong — and that's where the structure lives:
+
+| vertex | Pearson(ε, mean log-damage) |
+|--------|---------------------------:|
+| V1 | −0.71 |
+| V2 | −0.69 |
+| V3 | **−0.80** |
+| V4 | −0.38 (small samples, noisy) |
+| V5 | **−0.89** |
+
+Strong anti-correlation across all vertices. The model's error severity is concentrated *opposite* to where ε peaks — error severity is largest where ε is smallest (at the endpoints of the mantissa range, m=0/8 and m=7/8), and smallest where ε is largest (in the middle, m=3/8 to 5/8).
+
+**The two-mode structure becomes clear in V3's table** (clean sample size and saturation):
+
+| m_c | ε(m) | mean ULP error | max ULP error | mean |log Δ| |
+|-----|-----:|---------------:|--------------:|-------------:|
+| 1/8 | 0.045 | 1.3 | 5 | 0.22 |
+| 3/8 | 0.084 | 2.5 | 4 | 0.30 |
+| 5/8 | 0.075 | 1.4 | 4 | 0.15 |
+| 0/8 | 0.000 | 37.6 | 2040 | 1.29 |
+| 7/8 | 0.032 | 138.9 | **3569** | 0.89 |
+
+Two distinct failure modes:
+
+- **Smooth-interior errors (m=1/8, 3/8, 5/8, ε is large)**: 1–2 ULP, max ULP error ≤ 5, log-damage ~0.15–0.30. The model picks an FP8 value adjacent to the correct one. These are *innocent rounding errors*.
+- **Edge errors (m=0/8, 7/8, ε is small)**: max ULP error in the thousands. Log-damage up to 1.3 (a factor of 2.5 wrong). These are *catastrophic errors* where the model loses the magnitude entirely — predicting the wrong binade, sometimes by multiple binades.
+
+### Why the model's residual is the dual of ε in the m coordinate
+
+ε(m) lives in the smooth interior of the mantissa range and is invisible at the endpoints. Binade fragility — the discrete coupling between mantissa-LSB rounding decisions and exponent flips — lives at the endpoints and is invisible in the interior. The two are structurally orthogonal hardness sources, sitting on opposite ends of the same m coordinate.
+
+The model's failures are not a uniform sampling of difficulty. The model handles smooth-interior cases with small errors (a few ULPs, locally bounded). It fails at edges with errors that can be wrong by entire binades. Empirically the model is *complementary* to ε: investing capability where ε predicts hard work, and paying for that investment at the binade boundaries where ε is innocent but discrete transitions are coupled.
+
+This connects to Landfall §4's derivative seam: ε'(0⁺) = 1/ln 2 − 1 ≈ 0.443 and ε'(1⁻) = 1/(2 ln 2) − 1 ≈ −0.279 — the derivative of ε jumps discontinuously at the binade boundary. The smooth concave bump of ε has a hard seam at its periodic extension. The model's catastrophic errors live exactly at that seam. Phrased less formally: the *value* derivative across a binade transition is effectively unbounded (1 ULP of representational distance equals a multiplicative factor at the boundary), and the model crashes at that effectively-unbounded derivative.
+
+### The model's residual is in the discretization, not the abstraction
+
+Landfall's ε is the irreducible residual of the *abstraction* — the affine pseudo-log against the true log. Our model's residual is in the *discretization* — the mantissa-exponent coordination at the boundary ε doesn't see. Both are real and both are unflattenable in their own way. The model trained on FP8 addition isn't approximating log; it's approximating the discretized FP8 algorithm, and the residual it leaves behind has the shape of the discretization's hard seams, not the abstraction's smooth bump.
+
+V5's correlation (ρ = −0.89, the strongest in the table) shows this isn't a feature of saturation — the dual-of-ε severity shape is present even at depth-1. **The shape is set by the format, not by the architecture or training.** What the architecture+training controls is *how often* the model lands in the binade-transition pit (rate), not the *severity* of falling in (shape).
+
+### Bit-decomposition of errors — the two failure modes are categorically different
+
+The dual-of-ε reading predicts smooth-interior errors are mantissa-only (innocent rounding) and endpoint errors are exponent-coordination failures. The bit-decomposition probe (`code/errorboard/epsilon_bit_decomp.py`) confirms this almost categorically.
+
+V3 aggregate fractions of errors that are *mantissa-only* vs *involve any exponent bit*:
+
+| m_c | n_err | mant-only % | any-exp-error % |
+|-----|------:|-----------:|----------------:|
+| 0/8 | 125 | 24.0% | **76.0%** |
+| 1/8 | 155 | 98.1% | 1.9% |
+| 2/8 | 75 | 97.3% | 2.7% |
+| 3/8 | 146 | **100.0%** | **0.0%** |
+| 4/8 | 60 | 98.3% | 1.7% |
+| 5/8 | 134 | **100.0%** | **0.0%** |
+| 6/8 | 79 | 78.5% | 21.5% |
+| 7/8 | 127 | 57.5% | **42.5%** |
+
+m=3/8 and m=5/8 at V3 have **zero exponent errors out of 280 errors combined.** Every miss in these bins is a within-binade mantissa-rounding mistake. At m=7/8, 42.5% of errors involve a wrong exponent bit.
+
+**Sign errors are essentially nonexistent across all vertices** (0%–2.7% per bin). Whatever the model is failing at, it's not sign logic.
+
+### V4 vs V5 reveals what saturation actually accomplishes
+
+V4 has many fewer errors than V5, but a *higher proportion* of V4's errors involve exponent bits at the endpoints:
+
+| vertex | m=7/8 n_err | m=7/8 any-exp-error % |
+|--------|------------:|----------------------:|
+| V2 | 188 | 66.0% |
+| V3 | 127 | 42.5% |
+| V4 | 20 | **85.0%** |
+| V5 | 134 | 32.1% |
+
+V4 has 7× fewer errors at m=7/8 than V5 but a 2.6× higher fraction of them are exp errors. The mantissa-only errors get *cleaned up* with training and capacity; the exp-coordination errors remain. **Saturation polishes off the easy failure mode and concentrates the residual onto the hard one.**
+
+### Closing Finding 6
+
+The joint system settles into a residual error structure with two qualitatively distinct failure modes:
+
+1. **Mantissa-rounding fragility** in the smooth interior of the mantissa range. 1-ULP within-binade misses. Bounded local damage. Cleaned up by training and capacity.
+2. **Binade-coordination fragility** at the endpoints, especially m=7/8. Exponent-coupling failures. Damage scales by factors of 2 or more in real value. Resistant to training and capacity — the L4 saturated model has fewer total m=7/8 errors than depth-capped, but the proportion of those errors that involve an exp flip rises with saturation.
+
+These two failure modes live on opposite ends of the m coordinate. ε(m) lives in the smooth interior with the first mode; binade fragility lives at the boundaries with the second. The two are structurally orthogonal hardness sources, and our trained model fails differently in each region in mechanistically interpretable ways.
+
+The Landfall framework names ε as the irreducible residual of the affine pseudo-log abstraction. Our empirical work names binade-coordination as the irreducible residual of the discrete-FP representation. Both are real, both are unflattenable, and they sit in complementary regions of the same coordinate. The model handles the smooth-interior part of FP arithmetic well; what it fails at is the discrete-boundary coordination that the format imposes specifically to fight the Fourier seam ε's derivative has at the binade edge. Subnormals are part of that same engineered fight against the seam — they extend the smooth-interior treatment one binade further down, postponing where the model has to do exp coordination. The model's failures at the smallest binades and at the subnormal-result regime reflect exactly this: at the format's own engineered edge, the model's residual is concentrated.
+
+This is what we mean by "the joint system settled into an error shape." The shape is structurally complementary to ε: ε in the smooth interior, binade fragility at the edges. The architecture and training control how often the model falls into the binade-coordination pit; the format controls the existence of the pit. We have empirical evidence for the second claim and partial evidence (depth-conditional shape) for the first.
+
+### What would isolate the architecture's role
+
+Both probes characterize the joint output. To attribute error shape to architecture specifically:
+
+1. **RoPE comparison arm** (already tabled in `methodology.md`): same data, same training schedule, RoPE instead of learned-PE. If the per-regime / per-Δexp error pattern differs, the architecture is shaping the error space along the position-encoding axis. If it stays the same, position-encoding is not load-bearing for shape.
+
+2. **Cross-seed specific-failure analysis**: we already showed seeds within a cell look algorithmically similar at the regime-mean level. We haven't asked whether the *specific failing samples* are the same across seeds. If V3 seed-0 and seed-1 fail on the same 30-40 holdout pairs, the architecture (and training trajectory through it) is shaping; if they fail on disjoint sets that just happen to have the same distribution, it's lottery within an architectural constraint.
+
+Both tests are cheap. Neither is yet run. The L4-vs-L1 depth comparison above already gives partial isolation for one architectural axis; these would extend it.
+
 ## Caveats spanning the whole pass
 
 - **Single regime.** All probes ran on 64 cancellation-regime samples + 31 doubling samples. The per-block specialization and attention patterns may differ for other regimes (default, large-Δexp, etc.). The findings on commutativity and Thm 5 are likely regime-independent (they involve operand swapping, not the addition itself), but specifically the DLA "block 0 does mantissa, block 2 does exponent" intuition from the V3 single-vertex run is regime-conditional — we haven't shown the pattern holds outside cancellation.
@@ -196,7 +422,7 @@ In rough order of "how much would this resolve a current claim":
 
 2. ~~**Δexp-conditioned m0 probe.**~~ **Done** (see "Δexp slice — H1 substantively supported at V4" above). Outcome: H1 supported in modified form at V4; V3 has a coarser version; V5 doesn't have it. H2 still untested.
 
-3. **Subnormal-result slice for H2.** Stratify the m0 cos-sim and c:m0 attention by whether the *result* is subnormal. If H2 (subnormal renormalization) contributes to the m0 anomaly, the divergence should be larger for subnormal-result cases. If pattern is similar across normal-result and subnormal-result, H2 is ruled out and the m0 anomaly is mostly H1 + a vertex-wide H3 background.
+3. ~~**Subnormal-result slice for H2.**~~ **Done** (see "Subnormal-result slice — H2 falsified" above). Outcome: H2 ruled out as a contributor; the m0 anomaly is best read as H1 + a vertex-wide H3 background.
 
 4. **Run probes on the `default` regime.** Confirm that finding 3 (block 3 dominance) and finding 5 (V3 vs V5 mechanism difference) generalize beyond cancellation. The "structured curriculum" hypothesis predicts regimes look similar in layer specialization — testable.
 
