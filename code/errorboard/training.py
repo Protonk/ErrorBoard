@@ -34,8 +34,10 @@ from .dataset import (
 from .model import GPT, GPTConfig
 from . import preprocess as _add_preprocess
 from . import preprocess_mult as _mul_preprocess
+from . import preprocess_recip as _rec_preprocess
 from . import regimes as _add_regimes
 from . import mult_regimes as _mul_regimes
+from . import recip_regimes as _rec_regimes
 from . import tokenizer as _bit_tokenizer
 from . import sem_tokenizer as _sem_tokenizer
 
@@ -55,6 +57,8 @@ def _resolve_operation(name: str):
         return _add_preprocess, _add_regimes
     if name == "mul":
         return _mul_preprocess, _mul_regimes
+    if name == "recip":
+        return _rec_preprocess, _rec_regimes
     raise ValueError(f"unknown operation: {name!r}")
 
 
@@ -401,7 +405,7 @@ def main() -> None:
     p.add_argument("--d-mlp", type=int, default=512)
     p.add_argument("--pos-encoding", default="learned", choices=["learned", "rope"])
     p.add_argument("--tokenization", default="bit", choices=["bit", "sem"])
-    p.add_argument("--operation", default="add", choices=["add", "mul"])
+    p.add_argument("--operation", default="add", choices=["add", "mul", "recip"])
     # schedule
     p.add_argument("--max-iters", type=int, default=20_000)
     p.add_argument("--warmup-iters", type=int, default=200)

@@ -37,8 +37,10 @@ from .fone_tokenizer import (
 )
 from . import preprocess as _add_preprocess
 from . import preprocess_mult as _mul_preprocess
+from . import preprocess_recip as _rec_preprocess
 from . import regimes as _add_regimes
 from . import mult_regimes as _mul_regimes
+from . import recip_regimes as _rec_regimes
 from .dataset import natural_distribution_weights
 
 
@@ -47,6 +49,8 @@ def _resolve_operation(name: str):
         return _add_preprocess, _add_regimes
     if name == "mul":
         return _mul_preprocess, _mul_regimes
+    if name == "recip":
+        return _rec_preprocess, _rec_regimes
     raise ValueError(f"unknown operation: {name!r}")
 
 
