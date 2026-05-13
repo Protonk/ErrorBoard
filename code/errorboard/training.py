@@ -32,8 +32,10 @@ from .dataset import (
     per_regime_eval_loaders,
 )
 from .model import GPT, GPTConfig
-from .preprocess import build_table, split_train_holdout
-from .regimes import NUM_REGIMES, REGIME_NAMES
+from . import preprocess as _add_preprocess
+from . import preprocess_mult as _mul_preprocess
+from . import regimes as _add_regimes
+from . import mult_regimes as _mul_regimes
 from . import tokenizer as _bit_tokenizer
 from . import sem_tokenizer as _sem_tokenizer
 
@@ -45,6 +47,15 @@ def _resolve_tokenizer(name: str):
     if name == "sem":
         return _sem_tokenizer
     raise ValueError(f"unknown tokenization mode: {name!r}")
+
+
+def _resolve_operation(name: str):
+    """Return (preprocess_module, regimes_module) for the named operation."""
+    if name == "add":
+        return _add_preprocess, _add_regimes
+    if name == "mul":
+        return _mul_preprocess, _mul_regimes
+    raise ValueError(f"unknown operation: {name!r}")
 
 
 @dataclass
@@ -66,6 +77,10 @@ class TrainingConfig:
 
     # tokenization: "bit" (default, 8-token-per-FP8) or "sem" (3-token-per-FP8).
     tokenization: str = "bit"
+
+    # operation: "add" (default) or "mul"; selects which oracle and regime
+    # classifier the pair table is built from.
+    operation: str = "add"
 
     # optimizer (AdamW)
     learning_rate: float = 1e-3
@@ -178,11 +193,12 @@ def _train_subsample_loaders(
     train_indices: np.ndarray,
     batch_size: int,
     n_per_regime: int,
+    num_regimes: int,
     encode_fn=None,
 ) -> dict[int, EvalBatcher]:
     """Per-regime training-pool eval loaders, deterministically subsampled to n_per_regime each."""
     out: dict[int, EvalBatcher] = {}
-    for r in range(NUM_REGIMES):
+    for r in range(num_regimes):
         mask = table["regime_id"][train_indices] == r
         idx = train_indices[mask][:n_per_regime]
         if len(idx) > 0:
@@ -227,9 +243,14 @@ def train(cfg: TrainingConfig) -> dict:
         result_end = tk.POS_C_END - 1
         encode_fn = tk.encode_batch
 
+        # ---- operation dispatch (selects preprocess + regime modules) ----
+        pp, rg = _resolve_operation(cfg.operation)
+        regime_names = rg.REGIME_NAMES
+        num_regimes = rg.NUM_REGIMES
+
         # ---- data ----
-        table = build_table()
-        train_idx, holdout_idx = split_train_holdout(
+        table = pp.build_table()
+        train_idx, holdout_idx = pp.split_train_holdout(
             table, holdout_frac=cfg.holdout_frac,
             min_holdout=cfg.min_holdout, seed=cfg.seed,
         )
@@ -239,7 +260,7 @@ def train(cfg: TrainingConfig) -> dict:
         )
         train_eval_loaders = _train_subsample_loaders(
             table, train_idx, cfg.eval_batch_size, cfg.train_eval_subsample,
-            encode_fn=encode_fn,
+            num_regimes=num_regimes, encode_fn=encode_fn,
         )
         nat_weights = natural_distribution_weights(table)
 
@@ -290,15 +311,15 @@ def train(cfg: TrainingConfig) -> dict:
                     if r not in sampler.active_regimes:
                         continue
                     lo, ac, _ = _eval_pool(model, loader, device, result_start, result_end)
-                    holdout_loss[REGIME_NAMES[r]] = lo
-                    holdout_acc[REGIME_NAMES[r]] = ac
+                    holdout_loss[regime_names[r]] = lo
+                    holdout_acc[regime_names[r]] = ac
                 row["holdout_loss"] = holdout_loss
                 row["holdout_acc"] = holdout_acc
 
                 # Natural-distribution scalar: weighted avg of per-regime holdout losses.
                 nat_num, nat_den = 0.0, 0.0
                 for r in sampler.active_regimes:
-                    name = REGIME_NAMES[r]
+                    name = regime_names[r]
                     if name in holdout_loss and not math.isnan(holdout_loss[name]):
                         w = float(nat_weights[r])
                         nat_num += w * holdout_loss[name]
@@ -310,7 +331,7 @@ def train(cfg: TrainingConfig) -> dict:
                     if r not in sampler.active_regimes:
                         continue
                     lo, _, _ = _eval_pool(model, loader, device, result_start, result_end)
-                    train_loss[REGIME_NAMES[r]] = lo
+                    train_loss[regime_names[r]] = lo
                 row["train_loss"] = train_loss
                 row["wall_time"] = time.time() - t_start
 
@@ -380,6 +401,7 @@ def main() -> None:
     p.add_argument("--d-mlp", type=int, default=512)
     p.add_argument("--pos-encoding", default="learned", choices=["learned", "rope"])
     p.add_argument("--tokenization", default="bit", choices=["bit", "sem"])
+    p.add_argument("--operation", default="add", choices=["add", "mul"])
     # schedule
     p.add_argument("--max-iters", type=int, default=20_000)
     p.add_argument("--warmup-iters", type=int, default=200)
@@ -396,6 +418,7 @@ def main() -> None:
         run_name=args.run_name, runs_dir=args.runs_dir, seed=args.seed,
         n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd, d_mlp=args.d_mlp,
         pos_encoding=args.pos_encoding, tokenization=args.tokenization,
+        operation=args.operation,
         max_iters=args.max_iters, warmup_iters=args.warmup_iters,
         batch_size=args.batch_size, learning_rate=args.learning_rate, min_lr=args.min_lr,
         eval_interval=args.eval_interval, device=args.device,

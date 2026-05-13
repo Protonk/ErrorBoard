@@ -29,8 +29,18 @@ from .fone_f2_dataset import (
 )
 from .fone_f2_model import FoneF2GPT, FoneF2GPTConfig, fone_f2_correct, fone_f2_loss
 from .fone_f2_tokenizer import POS_NUM_C, POS_SIGN_C, SEQ_LEN, VOCAB_SIZE
-from .preprocess import build_table, split_train_holdout
-from .regimes import NUM_REGIMES, REGIME_NAMES
+from . import preprocess as _add_preprocess
+from . import preprocess_mult as _mul_preprocess
+from . import regimes as _add_regimes
+from . import mult_regimes as _mul_regimes
+
+
+def _resolve_operation(name: str):
+    if name == "add":
+        return _add_preprocess, _add_regimes
+    if name == "mul":
+        return _mul_preprocess, _mul_regimes
+    raise ValueError(f"unknown operation: {name!r}")
 
 
 @dataclass
@@ -38,6 +48,9 @@ class FoneF2TrainingConfig:
     run_name: str = "fone-f2-default"
     runs_dir: str = "runs"
     seed: int = 0
+
+    # operation: "add" (default) or "mul"
+    operation: str = "add"
 
     n_layer: int = 4
     n_head: int = 4
@@ -130,9 +143,9 @@ def _eval_pool(model: FoneF2GPT, loader: EvalBatcherFoneF2,
     return total_loss / n_pairs, n_correct / n_pairs, n_pairs
 
 
-def _train_subsample_loaders(table, train_indices, batch_size, n_per_regime):
+def _train_subsample_loaders(table, train_indices, batch_size, n_per_regime, num_regimes):
     out: dict[int, EvalBatcherFoneF2] = {}
-    for r in range(NUM_REGIMES):
+    for r in range(num_regimes):
         mask = table["regime_id"][train_indices] == r
         idx = train_indices[mask][:n_per_regime]
         if len(idx) > 0:
@@ -165,8 +178,13 @@ def train(cfg: FoneF2TrainingConfig) -> dict:
         _set_determinism(cfg.seed)
         device = torch.device(cfg.device)
 
-        table = build_table()
-        train_idx, holdout_idx = split_train_holdout(
+        # ---- operation dispatch ----
+        pp, rg = _resolve_operation(cfg.operation)
+        regime_names = rg.REGIME_NAMES
+        num_regimes = rg.NUM_REGIMES
+
+        table = pp.build_table()
+        train_idx, holdout_idx = pp.split_train_holdout(
             table, holdout_frac=cfg.holdout_frac,
             min_holdout=cfg.min_holdout, seed=cfg.seed,
         )
@@ -176,6 +194,7 @@ def train(cfg: FoneF2TrainingConfig) -> dict:
         )
         train_eval_loaders = _train_subsample_loaders(
             table, train_idx, cfg.eval_batch_size, cfg.train_eval_subsample,
+            num_regimes=num_regimes,
         )
         nat_weights = natural_distribution_weights(table)
 
@@ -222,14 +241,14 @@ def train(cfg: FoneF2TrainingConfig) -> dict:
                     if r not in sampler.active_regimes:
                         continue
                     lo, ac, _ = _eval_pool(model, loader, device)
-                    holdout_loss[REGIME_NAMES[r]] = lo
-                    holdout_acc[REGIME_NAMES[r]] = ac
+                    holdout_loss[regime_names[r]] = lo
+                    holdout_acc[regime_names[r]] = ac
                 row["holdout_loss"] = holdout_loss
                 row["holdout_acc"] = holdout_acc
 
                 nat_num, nat_den = 0.0, 0.0
                 for r in sampler.active_regimes:
-                    name = REGIME_NAMES[r]
+                    name = regime_names[r]
                     if name in holdout_loss and not math.isnan(holdout_loss[name]):
                         w = float(nat_weights[r])
                         nat_num += w * holdout_loss[name]
@@ -241,7 +260,7 @@ def train(cfg: FoneF2TrainingConfig) -> dict:
                     if r not in sampler.active_regimes:
                         continue
                     lo, _, _ = _eval_pool(model, loader, device)
-                    train_loss[REGIME_NAMES[r]] = lo
+                    train_loss[regime_names[r]] = lo
                 row["train_loss"] = train_loss
                 row["wall_time"] = time.time() - t_start
 
