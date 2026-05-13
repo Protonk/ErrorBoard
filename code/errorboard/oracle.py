@@ -168,6 +168,30 @@ def mul(a_bits: int, b_bits: int) -> int:
     return encode(true_product)
 
 
+def reciprocal(a_bits: int) -> int:
+    """Compute 1/a for an E4M3 input; return result bit pattern.
+
+    NaN input → NAN_BITS. Zero input (signed) → saturates to ±448 per OCP-fn
+    overflow semantics; the result sign matches the input sign (so 1/(+0)=+448,
+    1/(-0)=-448). Otherwise: compute 1/a in float64 and re-encode under
+    RNE + saturation.
+
+    Smallest positive subnormal 2^-9 gives 1/2^-9 = 512 > 448 → saturates to 448.
+    Smallest representable normal 2^-6 gives 1/2^-6 = 64 (representable).
+    Largest finite 448 gives 1/448 ≈ 0.002232... → rounds to nearest subnormal.
+    """
+    if _is_nan_bits(a_bits):
+        return NAN_BITS
+
+    a_val, kind = decode(a_bits)
+    if kind == "zero":
+        sign = (a_bits >> 7) & 1
+        return (sign << 7) | (EXP_MASK << 3) | 0x6  # ±448
+
+    true_recip = 1.0 / a_val
+    return encode(true_recip)
+
+
 # ---- spot-check assertions exercised on `python -m errorboard.oracle` ----
 
 def _spot_checks() -> None:
@@ -273,6 +297,50 @@ def _spot_checks() -> None:
     # Multiplication: subnormal arithmetic
     # 2^-9 * 2.0 = 2^-8, which is a subnormal (2/8 * 2^-6 = 2^-8). Bit 0x02.
     assert mul(0x01, 0x40) == 0x02                 # 2^-9 * 2.0 = 2^-8
+
+    # Reciprocal: NaN propagation
+    assert reciprocal(0x7F) == NAN_BITS
+    assert reciprocal(0xFF) == NAN_BITS
+
+    # Reciprocal: zero overflows to ±448 (sign preserved)
+    assert reciprocal(0x00) == 0x7E                # 1/(+0) = +448
+    assert reciprocal(0x80) == 0xFE                # 1/(-0) = -448
+
+    # Reciprocal: identities
+    assert reciprocal(0x38) == 0x38                # 1/1 = 1
+    assert reciprocal(0xB8) == 0xB8                # 1/(-1) = -1
+    assert reciprocal(0x40) == 0x30                # 1/2 = 0.5
+    assert reciprocal(0x30) == 0x40                # 1/0.5 = 2
+
+    # Reciprocal: power-of-2 ladder (exponent negation)
+    assert reciprocal(0x48) == 0x28                # 1/4 = 0.25
+    assert reciprocal(0x28) == 0x48                # 1/0.25 = 4
+    assert reciprocal(0x08) == 0x68                # 1/(2^-6) = 64
+
+    # Reciprocal: overflow saturation (smallest normals reach max finite)
+    # 1/(min normal 2^-6) = 64 = 1.0 * 2^6 -> bit pattern 0x68 (representable, NOT saturated)
+    # 1/(min subnormal 2^-9) = 512 > 448 -> saturates to 448 = 0x7E
+    assert reciprocal(0x01) == 0x7E                # 1/(2^-9) overflows
+    assert reciprocal(0x81) == 0xFE                # 1/(-2^-9) overflows negatively
+
+    # Reciprocal: subnormal output for very large input
+    # 1/448 ≈ 0.002232 → rounds to nearest subnormal/normal.
+    # 0.002232 / 2^-9 = 1.143; banker's rounding -> 1 → subnormal m=1 → bit 0x01.
+    assert reciprocal(0x7E) == 0x01                # 1/448 → smallest positive subnormal
+    assert reciprocal(0xFE) == 0x81                # 1/(-448) → negative smallest subnormal
+
+    # Reciprocal: positive-normal worst input (dayval's 0x75)
+    # 0x75 = 1.625 * 2^7 = 208. 1/208 ≈ 0.004807692; smallest representable
+    # subnormal step is 2^-9 ≈ 0.001953. 0.004807 / 2^-9 ≈ 2.46 → rounds to 2.
+    # So result is 2 * 2^-9 = 0.00390625 → bit 0x02.
+    assert reciprocal(0x75) == 0x02                # 1/208 → 2 * 2^-9 = 0.00390625
+
+    # Reciprocal involution: applying twice should give back the original on
+    # values where 1/(1/x) round-trips exactly. Powers of 2 always do.
+    for bits in [0x38, 0xB8, 0x40, 0x30, 0x48, 0x28, 0x08, 0x68]:
+        assert reciprocal(reciprocal(bits)) == bits, (
+            f"recip(recip(0x{bits:02x})) != 0x{bits:02x}"
+        )
 
     print("all spot checks passed")
 

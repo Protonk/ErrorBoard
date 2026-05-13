@@ -1,9 +1,10 @@
 """Exhaustive verification of `torch.float8_e4m3fn` against the spec-derived oracle.
 
 Per task_spec.md §4: compare oracle and torch on every one of the 256 single-pattern
-decodings, every one of the 65,536 ordered addition pairs, and every one of the
-65,536 ordered multiplication pairs. Bit-level comparison; NaN treated as a
-value-equivalence class but the verifier still tracks bit patterns.
+decodings, every one of the 65,536 ordered addition pairs, every one of the
+65,536 ordered multiplication pairs, and every one of the 256 reciprocal inputs.
+Bit-level comparison; NaN treated as a value-equivalence class but the verifier
+still tracks bit patterns.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import sys
 import numpy as np
 import torch
 
-from errorboard.oracle import NAN_BITS, add, decode, encode, mul
+from errorboard.oracle import NAN_BITS, add, decode, encode, mul, reciprocal
 
 torch_fp8 = torch.float8_e4m3fn
 
@@ -38,6 +39,14 @@ def _torch_mul_bits(a_bits: int, b_bits: int) -> int:
     a = torch.tensor([a_bits], dtype=torch.uint8).view(torch_fp8)
     b = torch.tensor([b_bits], dtype=torch.uint8).view(torch_fp8)
     c_fp8 = (a.float() * b.float()).to(torch_fp8)
+    return int(c_fp8.view(torch.uint8).item())
+
+
+def _torch_reciprocal_bits(a_bits: int) -> int:
+    """Compute 1/a for an E4M3 bit pattern using torch."""
+    a = torch.tensor([a_bits], dtype=torch.uint8).view(torch_fp8)
+    one = torch.tensor([1.0], dtype=torch.float32)
+    c_fp8 = (one / a.float()).to(torch_fp8)
     return int(c_fp8.view(torch.uint8).item())
 
 
@@ -156,13 +165,36 @@ def verify_mul_exhaustive() -> tuple[int, list[tuple[int, int, int, int]]]:
     return len(a_flat), mismatches
 
 
+def verify_reciprocal_exhaustive() -> tuple[int, list[tuple[int, int, int]]]:
+    """Compare oracle.reciprocal vs torch fp8 (1/a) on all 256 patterns.
+
+    Returns (num_compared, list of (a_bits, oracle_result, torch_result)).
+    NaN-equivalent results treated as agreement.
+    """
+    mismatches = []
+    all_bits = np.arange(256, dtype=np.uint8)
+    a_t = torch.from_numpy(all_bits.copy()).view(torch_fp8)
+    one = torch.tensor([1.0], dtype=torch.float32)
+    c_t = (one / a_t.float()).to(torch_fp8)
+    c_bits = c_t.view(torch.uint8).numpy()
+
+    for i in range(256):
+        a_b = int(all_bits[i])
+        oracle_r = reciprocal(a_b)
+        torch_r = int(c_bits[i])
+        if not _nan_equivalent_bits(oracle_r, torch_r):
+            mismatches.append((a_b, oracle_r, torch_r))
+
+    return len(all_bits), mismatches
+
+
 def main() -> int:
     print(f"torch version: {torch.__version__}")
     print(f"dtype: {torch_fp8}")
     print()
 
     print("=" * 60)
-    print("Test 1/4: decode comparison (256 bit patterns)")
+    print("Test 1/5: decode comparison (256 bit patterns)")
     print("=" * 60)
     dec_mismatches = verify_decode()
     if dec_mismatches:
@@ -176,7 +208,7 @@ def main() -> int:
     print()
 
     print("=" * 60)
-    print("Test 2/4: encode round-trip (254 finite patterns)")
+    print("Test 2/5: encode round-trip (254 finite patterns)")
     print("=" * 60)
     rt_mismatches = verify_encode_roundtrip()
     if rt_mismatches:
@@ -220,20 +252,31 @@ def main() -> int:
         return True
 
     print("=" * 60)
-    print("Test 3/4: addition agreement (65,536 ordered pairs)")
+    print("Test 3/5: addition agreement (65,536 ordered pairs)")
     print("=" * 60)
     n, add_mismatches = verify_add_exhaustive()
     add_fail = _report("+", n, add_mismatches)
     print()
 
     print("=" * 60)
-    print("Test 4/4: multiplication agreement (65,536 ordered pairs)")
+    print("Test 4/5: multiplication agreement (65,536 ordered pairs)")
     print("=" * 60)
     n_mul, mul_mismatches = verify_mul_exhaustive()
     mul_fail = _report("*", n_mul, mul_mismatches)
     print()
 
-    any_fail = bool(dec_mismatches or rt_mismatches or add_fail or mul_fail)
+    print("=" * 60)
+    print("Test 5/5: reciprocal agreement (256 inputs)")
+    print("=" * 60)
+    n_rec, rec_mismatches = verify_reciprocal_exhaustive()
+    # Unary mismatches have shape (a, oracle, torch) — adapt to _report's
+    # expected (a, b, oracle, torch) by stuffing a placeholder b.
+    rec_adapted = [(a, 0, ob, tb) for (a, ob, tb) in rec_mismatches]
+    rec_fail = _report("1/", n_rec, rec_adapted)
+    print()
+
+    any_fail = bool(dec_mismatches or rt_mismatches or add_fail or mul_fail
+                    or rec_fail)
     print("=" * 60)
     print("OVERALL:", "FAIL" if any_fail else "PASS")
     print("=" * 60)
