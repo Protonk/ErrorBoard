@@ -177,25 +177,24 @@ def _compute_severity_fone(out: dict, arm: str) -> dict:
 
 
 def _stratify_by_epsilon_mult(rows, sev: dict, correct: np.ndarray) -> list[dict]:
-    """Bin pairs by ε_mult value and compute mean severity per bin.
-
-    Bins: {0, (0, 1/64], (1/64, 4/64], (4/64, 9/64], (9/64, 16/64], (16/64, 25/64],
-           (25/64, 36/64], (36/64, 49/64]}.
-    """
-    edges = [0.0, 1/64, 4/64, 9/64, 16/64, 25/64, 36/64, 49/64 + 1e-9]
-    labels = ["= 0", "(0, 1/64]", "(1/64, 4/64]", "(4/64, 9/64]",
-              "(9/64, 16/64]", "(16/64, 25/64]", "(25/64, 36/64]", "(36/64, 49/64]"]
+    """Bin pairs by ε_mult value and compute mean severity per bin."""
+    bin_defs: list[tuple[str, callable]] = [
+        ("= 0",              lambda e: e == 0),
+        ("(0, 1/64]",        lambda e: (e > 0) & (e <= 1/64)),
+        ("(1/64, 4/64]",     lambda e: (e > 1/64) & (e <= 4/64)),
+        ("(4/64, 9/64]",     lambda e: (e > 4/64) & (e <= 9/64)),
+        ("(9/64, 16/64]",    lambda e: (e > 9/64) & (e <= 16/64)),
+        ("(16/64, 25/64]",   lambda e: (e > 16/64) & (e <= 25/64)),
+        ("(25/64, 36/64]",   lambda e: (e > 25/64) & (e <= 36/64)),
+        ("(36/64, 49/64]",   lambda e: (e > 36/64) & (e <= 49/64 + 1e-9)),
+    ]
     out = []
     n = len(rows)
     eps_vals = np.array([epsilon_mult(int(rows[i]["a_bits"]),
                                        int(rows[i]["b_bits"]))
                           for i in range(n)])
-    for k, label in enumerate(labels):
-        if k == 0:
-            mask = eps_vals == 0
-        else:
-            mask = (eps_vals > edges[k]) & (eps_vals <= edges[k + 1])
-        # Restrict to non-NaN
+    for label, predicate in bin_defs:
+        mask = predicate(eps_vals)
         valid = mask & ~np.isnan(eps_vals)
         n_total = int(valid.sum())
         if n_total == 0:
