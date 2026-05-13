@@ -1,6 +1,6 @@
 # Future arms — ordered priority list
 
-This document lists arms that are scoped, motivated, and queued, but not yet built. **RoPE arm completed 2026-05-13** (see `notes/rope_arm_findings.md`). The SEM section below has been updated to incorporate the post-RoPE sharpening; FoNE and cross-axis sections are unchanged from the pre-RoPE writeup.
+**Status as of 2026-05-13:** the four addition arms are closed (RoPE, SEM, FoNE F1, FoNE F2). The next experimental thread is **multiplication** — re-running the four-arm cross under FP8 multiply rather than add. See "Arm 5: Multiplication" below for the scoping. The earlier arm sections (RoPE, SEM, FoNE F1, FoNE F2) are preserved as historical context — they were the planning documents for arms now completed, and the findings memos linked in `README.md` are the current authoritative writeup.
 
 The arms are listed in priority order based on what we've learned from the bit-level + learned-PE work in `pentagon_writeup.md`. Each arm tests a specific question that emerged from the current findings; the question is what makes it worth doing now (rather than as a generic ablation).
 
@@ -149,17 +149,137 @@ These are not yet scoped in detail. Recorded so we don't lose them.
 
 ## Priority order
 
-1. ~~RoPE~~ (current step, in progress)
-2. **{S, E, M} 3-token** — cleanest mechanistic test of the bit-decomposition / binade-coordination finding. ~4-6 hours infra, very high information per cost.
-3. **FoNE** — deepest contrast at the input-representation axis. Tests format-intrinsic vs tokenization-shaped for everything. ~1-2 days infra plus new probes.
-4. Cross-axis experiments — scope after 2 and 3 land.
+1. ~~RoPE~~ — closed, [`rope_arm_findings.md`](rope_arm_findings.md).
+2. ~~{S, E, M} 3-token~~ — closed, [`sem_arm_findings.md`](sem_arm_findings.md).
+3. ~~FoNE F1 (decimal)~~ — closed, [`fone_arm_findings.md`](fone_arm_findings.md),
+   [`fone_pilot_findings.md`](fone_pilot_findings.md),
+   [`fone_transition_memo.md`](fone_transition_memo.md).
+4. ~~FoNE F2 (binary)~~ — closed (ablation), [`fone_f2_memo.md`](fone_f2_memo.md).
+5. **Multiplication** — next experimental thread, see new section below.
+6. Cross-axis experiments — after multiplication.
 
-The "after-RoPE" ordering is set by *information per cost* and by *which prior findings would be most challenged*. {S, E, M} is the natural successor to RoPE because it isolates the *one* remaining axis we'd most expect to matter for our current findings: whether the model has to learn field structure from data or has it given as a prior.
+**Status of the addition arc:** all four input-representation arms tested
+at L4-E048 baseline, three of four (RoPE, SEM, FoNE F1) probed with scale
+followups. The single-claim summary in the README captures what we
+learned. The FoNE F2 ablation closed the loop on "does encoding alignment
+with format structure recover anti-ε" — answer: no, it recovers accuracy
+instead (precision, not shape recovery).
+
+---
+
+## Arm 5: Multiplication
+
+The addition arc treated FP8's structurally taxed operation. Multiplication
+is FP's native operation, and the four-arm cross under multiplication is
+predicted to invert nearly every effect:
+
+- **bit / RoPE / SEM** (FP-native): multiplication should be *easier*
+  than addition. No binade-coordination; no cancellation; the operation
+  decomposes cleanly into `exp_a + exp_b` and `mantissa_a × mantissa_b`,
+  with renormalization. Predicted: lottery substantially smaller than the
+  addition lottery for the same architecture and seeds.
+- **FoNE F1 / F2** (add-native via Fourier embedding): multiplication
+  should be *harder*. By BitTokens Prop 4.3, multiplication in the
+  Fourier basis is non-local — the product of two values requires
+  convolution across all Fourier components. The Hadamard product that
+  makes FoNE additively homomorphic does not extend to multiplication.
+
+The interpretive payoff: addition told us "operation alignment matters
+when the model has to navigate the binade structure through its encoding."
+Multiplication tests the dual claim: "operation misalignment matters
+when the model has to construct a non-local operation through a local-
+operation-friendly encoding." If FoNE F2 — which essentially solved
+addition — collapses on multiplication while bit/SEM thrive, the
+asymmetry is symmetric: each encoding has a native operation and a
+taxed operation, and the four-arm story is just one half of a two-by-two.
+
+### What changes infrastructurally
+
+- **Oracle (new)**: `oracle_mult.py` implementing FP8 E4M3 multiplication
+  per OCP spec. Operation decomposes as: sign XOR; exponent sum; mantissa
+  product; renormalize; round-to-nearest-even; handle subnormals,
+  overflow, NaN.
+- **Regime classifier (new)**: addition's 7 regimes don't all apply.
+  Multiplication regimes I'd expect: special-values (NaN, ±0), overflow,
+  underflow-to-zero/subnormal-result, exact-product (a×b is exactly
+  representable), rounding-tie (the half-even cases), default.
+  Cancellation doesn't exist for multiplication; large-Δexp is folded
+  into overflow/underflow.
+- **Pair table generation**: same shape — 256×256 = 65,536 pairs — but
+  with the new oracle's result-bits. The split / sampler / eval loaders
+  are encoding-agnostic and don't need to change.
+- **Tokenizers and training**: completely shared. The bit / SEM /
+  FoNE F1 / FoNE F2 tokenizers all encode (a, b, c) triples without
+  caring whether c = a + b or c = a × b. We pass the new pair table
+  through the existing pipeline.
+- **Probes**: most port directly. Severity (ULP, log-damage) is
+  operation-agnostic. Failure consensus, regime stratification, lottery
+  analysis all unchanged. Field/digit/bit-decomp ports per arm. Anti-ε
+  framing needs reconsideration — ε is the residual of an *affine
+  pseudo-log against the true log*, and multiplication interacts with
+  log differently than addition does (multiplication is the linear
+  operation in log space, addition is the messy one). Specifically, the
+  Park anti-ε result needs to be re-derived for the multiplication
+  oracle before we can claim it as a target.
+
+### Estimated infrastructure work
+
+- `oracle_mult.py` (~150 LOC, mirroring `oracle.py`): half a day
+- New regime classifier (~50 LOC): half a day
+- Verify against `torch.float8_e4m3fn`: half a day
+- Re-derive anti-ε for multiplication (~theoretical, ~1 day)
+- Re-run four arms × matched seeds: ~1 hour GPU
+- Probe and synthesis: ~half a day
+
+Total: ~3 days infrastructure before we can hand-off the same probe set
+to the new operation.
+
+### What we'd predict in advance (held lightly)
+
+| arm | addition mean fail % | mult mean fail % (predicted) | direction |
+|---|---:|---:|---|
+| bit | 8.98% | <5% | better |
+| RoPE | 11.93% | <8% | better |
+| SEM | 0.68% | <0.5% | better |
+| F1 (decimal FoNE) | 14.59% | >30% | worse |
+| F2 (binary FoNE) | <2% | >15% | much worse |
+
+If F2 (which essentially saturates addition) collapses on multiplication,
+we have the cleanest possible symmetry: same architecture, same training
+schedule, flip the operation, flip the encoding's native-vs-taxed status.
+
+### Open scoping questions
+
+- Whether to repeat the full scale sweep (L4-E048 → L4-E128) for each
+  arm, or just match-test at L4-E048. The scale curve under addition
+  taught us a lot; multiplication might or might not need it.
+- Whether to extend to L4-E256+ for FoNE F2 specifically, to see if its
+  multiplication collapse is recoverable with capacity (parallel to how
+  F1's anti-ε recovered with capacity for addition).
+- Whether to include a {addition, multiplication} multi-task arm at
+  some point. Probably premature — clean single-task results first.
+
+---
+
+## Arm 6: Cross-axis experiments (post-multiplication)
+
+Once both operations have four-arm coverage, the natural cross-axis
+follow-ups span operation × representation:
+
+- **RoPE × SEM × multiplication**: do the addition findings transfer?
+- **F2 × {addition, multiplication, both}**: how does the encoding's
+  native operation drop accuracy under the dual? Is there a multi-task
+  benefit or interference?
+- **F1 vs F2 head-to-head under multiplication**: the F2 vs F1
+  asymmetry on addition is precision-driven. Under multiplication F2
+  should still have its bit-position alignment but lose its operational
+  advantage. Interesting test of "what does F2 still get right when its
+  native operation isn't there?"
 
 ---
 
 ## What this doc is and isn't
 
-This is a planning document. None of these arms are launched. Each is scoped enough that we could pick it up and run it, but each requires a deliberate decision to commit the infrastructure work and probe-set adaptation.
-
-If we never get to {S, E, M} or FoNE, the pentagon writeup's "joint-system" claim remains honest at the bit-level + learned-PE + (post-RoPE) level. The future arms would *strengthen or weaken* the externalization of that claim; they would not invalidate the within-arm findings.
+This is a planning document. The five arms above the multiplication line
+are closed; the multiplication arm is the next experimental commitment.
+The cross-axis section is queued and not yet scoped in detail.

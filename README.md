@@ -16,7 +16,7 @@ a logarithm; the "almost" is ε. Our task is FP's structurally taxed
 operation, addition, all the way through — every probe is measuring that
 tax.
 
-## Headline findings
+## Headline findings (addition, closed)
 
 Each arm has a synthesis memo. Read in order:
 
@@ -33,16 +33,47 @@ Each arm has a synthesis memo. Read in order:
    mantissa) tokenization at matched L4-E048 × 20 seeds. Lottery nearly
    eliminated (mean fail 8.98% → 0.68%, heavy tail 22 → 0 pairs).
    Categorical split preserved and sharpened (95–100% exp_only at
-   endpoints). Anti-ε severity ρ = −0.917 — strongest yet. Bit-level
-   tokenization accounted for ~93% of what the bit-level lottery looked
-   like.
-4. [future_arms.md](notes/future_arms.md) — what's queued (FoNE,
-   cross-axis), with the post-RoPE / post-SEM sharpening incorporated.
+   endpoints). Anti-ε severity ρ = −0.917 — strongest yet.
+4. [fone_arm_findings.md](notes/fone_arm_findings.md) — F1 (decimal FoNE,
+   `T_i = 10^i`) at matched L4-E048 × 20 seeds. Inverts FP's parlay:
+   addition is the encoding's local operation. At small capacity FoNE has
+   a wide flat-error regime (anti-ε breaks, ρ ≈ +0.4) — *but this is a
+   capacity artifact*, see ↓
+5. [fone_pilot_findings.md](notes/fone_pilot_findings.md) and
+   [fone_transition_memo.md](notes/fone_transition_memo.md) — FoNE scale
+   sweep at L=4, n_embd ∈ {48, 64, 96, 128}. Mean ρ moves monotonically
+   +0.24 → +0.17 → +0.04 → −0.17. The flat-error regime is real and
+   spans a 4× capacity range; strong-negative anti-ε only starts emerging
+   at L4-E128 (one seed at ρ = −0.89).
+6. [fone_f2_memo.md](notes/fone_f2_memo.md) — F2 (binary FoNE, `T_i = 2^i`)
+   ablation. Aligning the period set with FP8's binade bit positions
+   collapses errors by 16× at L4-E048 and 100× at L4-E128 — but F2's
+   residual is flat, not anti-ε. F2's mechanism is precision (error
+   elimination), not shape recovery.
 
-Single-claim summary: **format pins the shape of irreducible difficulty;
-bit-level tokenization adds a large fluctuating overhead on top; position
-encoding modulates that overhead's probability distribution but cannot
-shift the format-pinned location.**
+Single-claim summary for addition: **format pins the shape of irreducible
+difficulty; bit-level tokenization adds a large fluctuating overhead on
+top; position encoding modulates that overhead's probability distribution
+but cannot shift the format-pinned location.** With one caveat from F2:
+an encoding that hands the model FP8's binade structure architecturally
+(binary periods) bypasses the navigation cost and saturates accuracy
+without ever producing anti-ε residuals — the model has nothing to be
+anti-ε about.
+
+## What's next: multiplication
+
+Addition is the operation FP is taxed for. Multiplication is FP's native
+operation. Re-running the four-arm cross under the multiplication oracle
+inverts every prediction:
+
+- **bit / RoPE / SEM** (FP-native arms): should do *better* than they did
+  on addition. No binade-coordination cost.
+- **F1 / F2 (FoNE)**: should do *worse*. Multiplication in the Fourier
+  basis is non-local (BitTokens Prop 4.3): two values' product requires
+  convolution across all Fourier components.
+
+The multiplication arc is the next experimental thread. Infrastructure
+work is sketched in [`notes/future_arms.md`](notes/future_arms.md).
 
 ## Layout
 
@@ -50,18 +81,31 @@ shift the format-pinned location.**
 code/errorboard/        training, model, probes
   tokenizer.py            bit-level (12 tokens, seq 28)
   sem_tokenizer.py        SEM 3-token (32 tokens, seq 13)
+  fone_tokenizer.py       F1 decimal FoNE (vocab 10, seq 10, FONE_DIM=12)
+  fone_f2_tokenizer.py    F2 binary FoNE  (vocab 10, seq 10, FONE_DIM=36)
   training.py             main loop; tokenization ∈ {bit, sem}
+  fone_training.py        F1 FoNE training loop
+  fone_f2_training.py     F2 FoNE training loop
   model.py                decoder-only GPT (pre-norm RMS, no biases, SiLU)
+  fone_model.py           F1 FoNE GPT (input feature-add + per-digit head)
+  fone_f2_model.py        F2 FoNE GPT (binary digits, 2-prototype head)
   hooked_bridge.py        nanoGPT-style ↔ TransformerLens conversion
   preprocess.py           build the classified 65,536-pair table
   regimes.py              7-regime classifier
-  dataset.py              stratified sampler + eval batchers
+  dataset.py              stratified sampler + eval batchers (bit / SEM)
+  fone_dataset.py         FoNE F1 sampler
+  fone_f2_dataset.py      FoNE F2 sampler
   sweep.py                model-size sweep driver
   rope_seeds.py           RoPE arm 20-seed launcher
   sem_seeds.py            SEM arm 20-seed launcher
+  fone_seeds.py           FoNE F1 20-seed launcher
+  fone_pilot.py           FoNE F1 5-seed launcher with --n-embd
+  fone_f2_pilot.py        FoNE F2 5-seed launcher with --n-embd
+  fone_transition.py      F1 capacity-sweep analyzer (E ∈ {48,64,96,128})
+  fone_f1_vs_f2.py        F1 vs F2 head-to-head comparison
   pentagon.py             5-vertex inspection harness
-  epsilon_*.py            severity + bit-decomp probes (+ _pe / _sem variants)
-  failure_*.py            lottery / consensus / overlap probes (+ _pe / _sem variants)
+  epsilon_*.py            severity + bit-decomp probes (per arm variants)
+  failure_*.py            lottery / consensus / overlap probes (per arm variants)
   m0_*.py                 m0-anomaly investigations
   fit_*.py                fit-vs-structure probes
 notes/                  memos, findings, planning
@@ -91,19 +135,24 @@ python -m errorboard.training \
   --tokenization sem --max-iters 1000 --device cpu
 ```
 
-Reproduce an arm (each ~20 min for 20 seeds at L4-E048):
+Reproduce an arm (each ~7-27 min on GPU depending on size):
 
 ```bash
-python -m errorboard.rope_seeds --runs-dir ../runs   # learned-PE + RoPE arms
-python -m errorboard.sem_seeds  --runs-dir ../runs   # SEM arm
+python -m errorboard.rope_seeds      --runs-dir ../runs       # learned-PE + RoPE bit-level
+python -m errorboard.sem_seeds       --runs-dir ../runs       # SEM 3-token
+python -m errorboard.fone_seeds      --runs-dir ../runs       # F1 decimal FoNE (20 seeds @ L4-E048)
+python -m errorboard.fone_pilot      --runs-dir ../runs --n-embd 128  # F1 capacity pilot
+python -m errorboard.fone_f2_pilot   --runs-dir ../runs --n-embd 48   # F2 binary FoNE
 ```
 
 Run the post-hoc probes:
 
 ```bash
-python -m errorboard.failure_consensus_sem      # three-arm lottery comparison
-python -m errorboard.epsilon_field_decomp_sem   # SEM bit-decomp analog
-python -m errorboard.epsilon_severity_sem
+python -m errorboard.failure_consensus_fone    # four-arm lottery (bit / RoPE / SEM / F1)
+python -m errorboard.fone_transition           # F1 capacity sweep analysis
+python -m errorboard.fone_f1_vs_f2             # F1 vs F2 head-to-head
+python -m errorboard.epsilon_severity_fone     # F1 severity
+python -m errorboard.epsilon_digit_decomp_fone # F1 digit-position decomp
 ```
 
 Each probe writes a markdown findings file under `notes/`.
@@ -124,11 +173,16 @@ articulated in `future_arms.md`'s Arm 3 section.
 
 ## Status
 
-Open arms (priority order, per `future_arms.md`):
+**Addition: closed.** All four arms trained, probed, and synthesized.
+Five-vertex pentagon, RoPE comparison, SEM tokenization, FoNE F1 with
+capacity transition, FoNE F2 ablation — see headline findings above.
 
-- **FoNE** — addition-native, multiplication-taxed encoding. The only
-  arm in the plan that inverts FP's parlay rather than varying access
-  to it. Tests whether the format pins shape *or* the operation does.
-- **Cross-axis** — RoPE × SEM, FoNE × precision, etc.
+**Multiplication: open, next.** Re-runs the same four-arm cross under
+the FP8 multiplication oracle. Predicted inversion: FP-native arms (bit,
+RoPE, SEM) should improve; FoNE arms should regress (multiplication is
+non-local in Fourier basis, BitTokens Prop 4.3). Infrastructure-shared
+with addition — new oracle, new regime classifier, same model + training
+pipeline. Plan: [`notes/future_arms.md`](notes/future_arms.md).
 
-Closed: pentagon (bit-level baseline), RoPE arm, SEM arm.
+**Future cross-axis** (after multiplication): RoPE × SEM, FoNE × precision,
+SEM × RoPE × multiplication, etc.
