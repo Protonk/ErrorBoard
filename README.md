@@ -10,7 +10,7 @@ isolate three system layers:
 - **position encoding** (learned absolute vs RoPE)
 
 The throughline is the irreducible residual function ε(m) = log₂(1+m) − m
-from [Landfall](https://adampunk.com) (the precursor paper this work tests
+from [Landfall](https://adampunk.com/documents/landfall.pdf) (the precursor paper this work tests
 in practice). FP's exponent-linear mantissa-discrete encoding is *almost*
 a logarithm; the "almost" is ε. Our task is FP's structurally taxed
 operation, addition, all the way through — every probe is measuring that
