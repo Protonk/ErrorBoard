@@ -147,6 +147,27 @@ def add(a_bits: int, b_bits: int) -> int:
     return encode(true_sum)
 
 
+def mul(a_bits: int, b_bits: int) -> int:
+    """Multiply two E4M3 numbers (bit patterns); return result bit pattern.
+
+    NaN inputs produce NAN_BITS (no NaN-times-zero NaN-injection: OCP E4M3 has no
+    inf, so the only NaN source is NaN propagation from the inputs). The exact
+    product is computed in float64 -- E4M3's largest finite is 448, so products
+    cap at 448^2 = 200,704, well within float64's range -- and re-encoded under
+    RNE + saturation.
+
+    Signed zero follows IEEE: Python's `*` preserves the sign bit on zero, and
+    encode() reads it via math.copysign.
+    """
+    if _is_nan_bits(a_bits) or _is_nan_bits(b_bits):
+        return NAN_BITS
+
+    a_val, _ = decode(a_bits)
+    b_val, _ = decode(b_bits)
+    true_product = a_val * b_val
+    return encode(true_product)
+
+
 # ---- spot-check assertions exercised on `python -m errorboard.oracle` ----
 
 def _spot_checks() -> None:
@@ -210,6 +231,48 @@ def _spot_checks() -> None:
 
     # Addition: underflow
     assert add(0x01, 0x81) == 0x00      # 2^-9 + (-2^-9) = +0
+
+    # Multiplication: NaN propagation
+    assert mul(0x00, 0x7F) == NAN_BITS
+    assert mul(0xFF, 0x08) == NAN_BITS
+    assert mul(0x7F, 0x7F) == NAN_BITS
+
+    # Multiplication: signed-zero (sign = XOR)
+    assert mul(0x00, 0x00) == 0x00                 # +0 * +0 = +0
+    assert mul(0x80, 0x80) == 0x00                 # -0 * -0 = +0
+    assert mul(0x00, 0x80) == 0x80                 # +0 * -0 = -0
+    assert mul(0x38, 0x00) == 0x00                 # 1.0 * +0 = +0
+    assert mul(0xB8, 0x00) == 0x80                 # -1.0 * +0 = -0
+    assert mul(0xB8, 0x80) == 0x00                 # -1.0 * -0 = +0
+
+    # Multiplication: sign XOR on non-zero operands
+    assert mul(0x38, 0x38) == 0x38                 # 1.0 * 1.0 = 1.0
+    assert mul(0x38, 0xB8) == 0xB8                 # 1.0 * -1.0 = -1.0
+    assert mul(0xB8, 0xB8) == 0x38                 # -1.0 * -1.0 = 1.0
+
+    # Multiplication: power-of-2 (exponent addition, no mantissa rounding)
+    assert mul(0x38, 0x40) == 0x40                 # 1.0 * 2.0 = 2.0
+    assert mul(0x40, 0x40) == 0x48                 # 2.0 * 2.0 = 4.0
+    assert mul(0x08, 0x40) == 0x10                 # 2^-6 * 2.0 = 2^-5
+
+    # Multiplication: exact mantissa product 1.25 * 1.25 = 1.5625 (representable)
+    # 1.25 = 1 + 1/4 = mantissa 0x2 at exp 7 -> bit pattern 0x3A
+    # 1.5625 = 1 + 9/16: but mantissa has only 3 bits = 1/8 resolution.
+    # 1.5 = 1 + 4/8 = 0x3C, 1.625 = 1 + 5/8 = 0x3D. So 1.5625 rounds to 1.5 (RNE: 4 even, 5 odd).
+    assert mul(0x3A, 0x3A) == 0x3C                 # 1.25 * 1.25 -> RNE -> 1.5
+
+    # Multiplication: overflow saturates to +-448
+    assert mul(0x7E, 0x40) == 0x7E                 # 448 * 2.0 -> saturate to 448
+    assert mul(0x7E, 0x7E) == 0x7E                 # 448 * 448 -> saturate
+    assert mul(0xFE, 0x40) == 0xFE                 # -448 * 2.0 -> -448
+
+    # Multiplication: underflow rounds to zero (tiny * tiny << min subnormal)
+    assert mul(0x01, 0x01) == 0x00                 # 2^-9 * 2^-9 = 2^-18 -> +0
+    assert mul(0x01, 0x81) == 0x80                 # 2^-9 * -2^-9 = -2^-18 -> -0
+
+    # Multiplication: subnormal arithmetic
+    # 2^-9 * 2.0 = 2^-8, which is a subnormal (2/8 * 2^-6 = 2^-8). Bit 0x02.
+    assert mul(0x01, 0x40) == 0x02                 # 2^-9 * 2.0 = 2^-8
 
     print("all spot checks passed")
 
