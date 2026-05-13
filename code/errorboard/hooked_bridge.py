@@ -29,17 +29,21 @@ from .model import GPT, GPTConfig
 
 
 def make_hooked_config(cfg: GPTConfig) -> HookedTransformerConfig:
-    """Build the TransformerLens config matching a GPTConfig."""
-    if cfg.pos_encoding != "learned":
+    """Build the TransformerLens config matching a GPTConfig.
+
+    Supports pos_encoding in {'learned', 'rope'}.
+    """
+    if cfg.pos_encoding not in ("learned", "rope"):
         raise NotImplementedError(
-            f"hooked_bridge currently only supports pos_encoding='learned', "
-            f"got {cfg.pos_encoding!r}. RoPE bridge is a separate path."
+            f"hooked_bridge currently supports pos_encoding ∈ {{'learned', 'rope'}}, "
+            f"got {cfg.pos_encoding!r}."
         )
-    return HookedTransformerConfig(
+    d_head = cfg.n_embd // cfg.n_head
+    base = dict(
         n_layers=cfg.n_layer,
         d_model=cfg.n_embd,
         n_heads=cfg.n_head,
-        d_head=cfg.n_embd // cfg.n_head,
+        d_head=d_head,
         d_mlp=cfg.d_mlp,
         n_ctx=cfg.block_size,
         d_vocab=cfg.vocab_size,
@@ -51,11 +55,19 @@ def make_hooked_config(cfg: GPTConfig) -> HookedTransformerConfig:
         # at ln1.normalized during debugging).
         eps=1e-6,
         attention_dir="causal",
-        positional_embedding_type="standard",
         tokenizer_name=None,
         default_prepend_bos=False,
         init_weights=False,
     )
+    if cfg.pos_encoding == "learned":
+        base["positional_embedding_type"] = "standard"
+    else:  # rope
+        base["positional_embedding_type"] = "rotary"
+        base["rotary_dim"] = d_head
+        # Our model uses GPT-NeoX / Llama convention with base=10000, applied to
+        # full d_head (split into two halves and rotated). Match TL.
+        base["rotary_base"] = 10000
+    return HookedTransformerConfig(**base)
 
 
 def convert_state_dict(gpt: GPT) -> dict[str, torch.Tensor]:
@@ -103,7 +115,10 @@ def convert_state_dict(gpt: GPT) -> dict[str, torch.Tensor]:
 
     # Embeddings — same shape, direct copy.
     sd["embed.W_E"] = sd_ours["wte.weight"].clone()
-    sd["pos_embed.W_pos"] = sd_ours["wpe.weight"].clone()
+    # Positional embedding: only learned-PE has wpe; RoPE applies position inside
+    # attention and has no pos_embed weights to copy.
+    if cfg.pos_encoding == "learned":
+        sd["pos_embed.W_pos"] = sd_ours["wpe.weight"].clone()
 
     # Final norm + unembed.
     sd["ln_final.w"] = sd_ours["norm_f.gain"].clone()
@@ -195,6 +210,8 @@ def verify_equivalence(
         if gpt.wpe is not None:
             pos = torch.arange(cfg.block_size, device=target_device).unsqueeze(0)
             emb_ours = emb_ours + gpt.wpe(pos)
+        # For RoPE, no positional addition at the embedding stage — rotation lives
+        # inside attention.
 
     # TL: use run_with_cache and pull intermediate residuals.
     logits_hooked, cache = hooked.run_with_cache(idx, return_type="logits")
@@ -247,21 +264,19 @@ def verify_equivalence(
 
 
 def _spot_checks() -> None:
-    """Run the bridge against a freshly-initialized small model (no training).
-    Tests that the state-dict surgery itself is correct, independent of any
-    real checkpoint."""
-    torch.manual_seed(0)
-    cfg = GPTConfig(n_layer=4, n_head=4, n_embd=44, d_mlp=176, block_size=27, vocab_size=12)
-    gpt = GPT(cfg)
-    gpt.eval()
-
-    hooked_cfg = make_hooked_config(cfg)
-    hooked = HookedTransformer(hooked_cfg)
-    hooked.load_state_dict(convert_state_dict(gpt), strict=False)
-    hooked.eval()
-
-    diffs = verify_equivalence(gpt, hooked, n_samples=4, tol=1e-4, verbose=True)
-    print(f"\nAll four stages within tolerance. Bridge OK on random init.")
+    """Test the bridge against fresh small models in both PE modes."""
+    for pe in ["learned", "rope"]:
+        print(f"\n--- pos_encoding={pe} ---")
+        torch.manual_seed(0)
+        # E=48 so d_head=12 (even), required for RoPE.
+        cfg = GPTConfig(n_layer=4, n_head=4, n_embd=48, d_mlp=192,
+                        block_size=27, vocab_size=12, pos_encoding=pe)
+        gpt = GPT(cfg).eval()
+        hooked = HookedTransformer(make_hooked_config(cfg))
+        hooked.load_state_dict(convert_state_dict(gpt), strict=False)
+        hooked.eval()
+        verify_equivalence(gpt, hooked, n_samples=4, tol=1e-4, verbose=True)
+    print(f"\nAll four stages within tolerance for both PE modes.")
 
 
 if __name__ == "__main__":
