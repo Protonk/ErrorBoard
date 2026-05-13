@@ -34,7 +34,17 @@ from .dataset import (
 from .model import GPT, GPTConfig
 from .preprocess import build_table, split_train_holdout
 from .regimes import NUM_REGIMES, REGIME_NAMES
-from .tokenizer import POS_C_END, POS_C_START, SEQ_LEN, VOCAB_SIZE
+from . import tokenizer as _bit_tokenizer
+from . import sem_tokenizer as _sem_tokenizer
+
+
+def _resolve_tokenizer(name: str):
+    """Return the tokenizer module matching `name`."""
+    if name == "bit":
+        return _bit_tokenizer
+    if name == "sem":
+        return _sem_tokenizer
+    raise ValueError(f"unknown tokenization mode: {name!r}")
 
 
 @dataclass
@@ -53,6 +63,9 @@ class TrainingConfig:
     d_mlp: int = 512
     pos_encoding: str = "learned"
     init_std: float = 0.02
+
+    # tokenization: "bit" (default, 8-token-per-FP8) or "sem" (3-token-per-FP8).
+    tokenization: str = "bit"
 
     # optimizer (AdamW)
     learning_rate: float = 1e-3
@@ -118,28 +131,22 @@ def _cosine_lr(iter_num: int, cfg: TrainingConfig) -> float:
     return cfg.min_lr + coeff * (cfg.learning_rate - cfg.min_lr)
 
 
-# Result-target positions in the shifted-target tensor (target[i] = sequence[i + 1]).
-# In a 27-length target tensor, result tokens occupy positions 18..25 inclusive (8 positions).
-_RESULT_TARGET_START = POS_C_START - 1  # 18
-_RESULT_TARGET_END = POS_C_END - 1      # 26
-
-
-def _result_only_targets(targets: torch.Tensor) -> torch.Tensor:
+def _result_only_targets(targets: torch.Tensor, result_start: int, result_end: int) -> torch.Tensor:
     """Mask all non-result targets to -1 so cross_entropy / accuracy use result tokens only."""
     masked = targets.clone()
     n_target = targets.shape[1]
-    # Mark non-result positions to ignore.
     keep = torch.zeros(n_target, dtype=torch.bool, device=targets.device)
-    keep[_RESULT_TARGET_START:_RESULT_TARGET_END] = True
+    keep[result_start:result_end] = True
     masked[:, ~keep] = -1
     return masked
 
 
 @torch.no_grad()
-def _eval_pool(model: GPT, loader: EvalBatcher, device: torch.device) -> tuple[float, float, int]:
+def _eval_pool(model: GPT, loader: EvalBatcher, device: torch.device,
+               result_start: int, result_end: int) -> tuple[float, float, int]:
     """Iterate a loader and return (mean_result_loss, result_token_accuracy, n_samples).
 
-    Loss/accuracy are computed over result tokens only (positions 18..25 in the target tensor).
+    Loss/accuracy are computed over result tokens only.
     """
     model.eval()
     total_loss = 0.0
@@ -149,7 +156,7 @@ def _eval_pool(model: GPT, loader: EvalBatcher, device: torch.device) -> tuple[f
     for batch in loader:
         inp = torch.from_numpy(batch["input"]).long().to(device)
         tgt = torch.from_numpy(batch["target"]).long().to(device)
-        tgt_masked = _result_only_targets(tgt)
+        tgt_masked = _result_only_targets(tgt, result_start, result_end)
         logits, loss = model(inp, tgt_masked)
         valid = (tgt_masked != -1)
         n_valid = int(valid.sum().item())
@@ -171,6 +178,7 @@ def _train_subsample_loaders(
     train_indices: np.ndarray,
     batch_size: int,
     n_per_regime: int,
+    encode_fn=None,
 ) -> dict[int, EvalBatcher]:
     """Per-regime training-pool eval loaders, deterministically subsampled to n_per_regime each."""
     out: dict[int, EvalBatcher] = {}
@@ -178,7 +186,7 @@ def _train_subsample_loaders(
         mask = table["regime_id"][train_indices] == r
         idx = train_indices[mask][:n_per_regime]
         if len(idx) > 0:
-            out[r] = EvalBatcher(table, idx, batch_size)
+            out[r] = EvalBatcher(table, idx, batch_size, encode_fn=encode_fn)
     return out
 
 
@@ -211,23 +219,34 @@ def train(cfg: TrainingConfig) -> dict:
         _set_determinism(cfg.seed)
         device = torch.device(cfg.device)
 
+        # ---- tokenization-spec resolution ----
+        tk = _resolve_tokenizer(cfg.tokenization)
+        seq_len = tk.SEQ_LEN
+        vocab_size = tk.VOCAB_SIZE
+        result_start = tk.POS_C_START - 1  # target-tensor offset
+        result_end = tk.POS_C_END - 1
+        encode_fn = tk.encode_batch
+
         # ---- data ----
         table = build_table()
         train_idx, holdout_idx = split_train_holdout(
             table, holdout_frac=cfg.holdout_frac,
             min_holdout=cfg.min_holdout, seed=cfg.seed,
         )
-        sampler = StratifiedSampler(table, train_idx, seed=cfg.seed)
-        holdout_eval_loaders = per_regime_eval_loaders(table, holdout_idx, cfg.eval_batch_size)
+        sampler = StratifiedSampler(table, train_idx, seed=cfg.seed, encode_fn=encode_fn)
+        holdout_eval_loaders = per_regime_eval_loaders(
+            table, holdout_idx, cfg.eval_batch_size, encode_fn=encode_fn,
+        )
         train_eval_loaders = _train_subsample_loaders(
-            table, train_idx, cfg.eval_batch_size, cfg.train_eval_subsample
+            table, train_idx, cfg.eval_batch_size, cfg.train_eval_subsample,
+            encode_fn=encode_fn,
         )
         nat_weights = natural_distribution_weights(table)
 
         # ---- model ----
         gpt_config = GPTConfig(
-            block_size=SEQ_LEN - 1,
-            vocab_size=VOCAB_SIZE,
+            block_size=seq_len - 1,
+            vocab_size=vocab_size,
             n_layer=cfg.n_layer, n_head=cfg.n_head, n_embd=cfg.n_embd, d_mlp=cfg.d_mlp,
             pos_encoding=cfg.pos_encoding, init_std=cfg.init_std,
         )
@@ -251,6 +270,7 @@ def train(cfg: TrainingConfig) -> dict:
         # ---- training loop ----
         print(
             f"[{cfg.run_name}] model={n_params:,} params  pos_encoding={cfg.pos_encoding}  "
+            f"tokenization={cfg.tokenization}  vocab={vocab_size}  seq_len={seq_len}  "
             f"device={device}  max_iters={cfg.max_iters}  batch={cfg.batch_size}",
             flush=True,
         )
@@ -269,7 +289,7 @@ def train(cfg: TrainingConfig) -> dict:
                 for r, loader in holdout_eval_loaders.items():
                     if r not in sampler.active_regimes:
                         continue
-                    lo, ac, _ = _eval_pool(model, loader, device)
+                    lo, ac, _ = _eval_pool(model, loader, device, result_start, result_end)
                     holdout_loss[REGIME_NAMES[r]] = lo
                     holdout_acc[REGIME_NAMES[r]] = ac
                 row["holdout_loss"] = holdout_loss
@@ -289,7 +309,7 @@ def train(cfg: TrainingConfig) -> dict:
                 for r, loader in train_eval_loaders.items():
                     if r not in sampler.active_regimes:
                         continue
-                    lo, _, _ = _eval_pool(model, loader, device)
+                    lo, _, _ = _eval_pool(model, loader, device, result_start, result_end)
                     train_loss[REGIME_NAMES[r]] = lo
                 row["train_loss"] = train_loss
                 row["wall_time"] = time.time() - t_start
@@ -359,6 +379,7 @@ def main() -> None:
     p.add_argument("--n-embd", type=int, default=128)
     p.add_argument("--d-mlp", type=int, default=512)
     p.add_argument("--pos-encoding", default="learned", choices=["learned", "rope"])
+    p.add_argument("--tokenization", default="bit", choices=["bit", "sem"])
     # schedule
     p.add_argument("--max-iters", type=int, default=20_000)
     p.add_argument("--warmup-iters", type=int, default=200)
@@ -374,7 +395,7 @@ def main() -> None:
     cfg = TrainingConfig(
         run_name=args.run_name, runs_dir=args.runs_dir, seed=args.seed,
         n_layer=args.n_layer, n_head=args.n_head, n_embd=args.n_embd, d_mlp=args.d_mlp,
-        pos_encoding=args.pos_encoding,
+        pos_encoding=args.pos_encoding, tokenization=args.tokenization,
         max_iters=args.max_iters, warmup_iters=args.warmup_iters,
         batch_size=args.batch_size, learning_rate=args.learning_rate, min_lr=args.min_lr,
         eval_interval=args.eval_interval, device=args.device,

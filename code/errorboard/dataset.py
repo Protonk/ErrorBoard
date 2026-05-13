@@ -15,7 +15,7 @@ from typing import Iterator
 import numpy as np
 
 from .regimes import NUM_REGIMES, REGIME_NAMES
-from .tokenizer import SEQ_LEN, encode_batch
+from .tokenizer import SEQ_LEN as _BIT_SEQ_LEN, encode_batch as _bit_encode_batch
 
 
 class StratifiedSampler:
@@ -23,12 +23,19 @@ class StratifiedSampler:
 
     Each call to sample_batch draws batch_size samples: regime is drawn uniformly
     over 1/NUM_REGIMES, then a pair is drawn uniformly within that regime's pool.
+
+    `encode_fn` lets a caller swap the tokenization (bit-level by default; SEM or
+    other tokenizers can be plugged in). The function must accept an (N, 3)
+    uint8/int array of (a_bits, b_bits, c_bits) and return an (N, SEQ_LEN) int64
+    tensor.
     """
 
-    def __init__(self, table: np.ndarray, train_indices: np.ndarray, seed: int = 0):
+    def __init__(self, table: np.ndarray, train_indices: np.ndarray, seed: int = 0,
+                 encode_fn=None):
         self.table = table
         self.train_indices = np.asarray(train_indices, dtype=np.int64)
         self.rng = np.random.default_rng(seed)
+        self.encode_fn = encode_fn if encode_fn is not None else _bit_encode_batch
 
         # Per-regime training pools, only for regimes with data. Empty regimes
         # (e.g., underflow-to-zero in FP8 E4M3 -- structurally unreachable) are
@@ -63,7 +70,7 @@ class StratifiedSampler:
 
         rows = self.table[table_idx]
         triples = np.stack([rows["a_bits"], rows["b_bits"], rows["result_bits"]], axis=1)
-        seqs = encode_batch(triples)
+        seqs = self.encode_fn(triples)
         return {
             "input": seqs[:, :-1],
             "target": seqs[:, 1:],
@@ -76,17 +83,19 @@ class StratifiedSampler:
 class EvalBatcher:
     """Ordered, exhaustive iterator over a fixed index pool. No randomness."""
 
-    def __init__(self, table: np.ndarray, indices: np.ndarray, batch_size: int):
+    def __init__(self, table: np.ndarray, indices: np.ndarray, batch_size: int,
+                 encode_fn=None):
         self.table = table
         self.indices = np.asarray(indices, dtype=np.int64)
         self.batch_size = batch_size
+        self.encode_fn = encode_fn if encode_fn is not None else _bit_encode_batch
 
     def __iter__(self) -> Iterator[dict]:
         for start in range(0, len(self.indices), self.batch_size):
             batch_idx = self.indices[start : start + self.batch_size]
             rows = self.table[batch_idx]
             triples = np.stack([rows["a_bits"], rows["b_bits"], rows["result_bits"]], axis=1)
-            seqs = encode_batch(triples)
+            seqs = self.encode_fn(triples)
             yield {
                 "input": seqs[:, :-1],
                 "target": seqs[:, 1:],
@@ -100,14 +109,14 @@ class EvalBatcher:
 
 
 def per_regime_eval_loaders(
-    table: np.ndarray, indices: np.ndarray, batch_size: int = 256
+    table: np.ndarray, indices: np.ndarray, batch_size: int = 256, encode_fn=None,
 ) -> dict[int, EvalBatcher]:
     """Build a per-regime dict of EvalBatchers over the given index pool."""
     out: dict[int, EvalBatcher] = {}
     indices = np.asarray(indices, dtype=np.int64)
     for r in range(NUM_REGIMES):
         mask = table["regime_id"][indices] == r
-        out[r] = EvalBatcher(table, indices[mask], batch_size)
+        out[r] = EvalBatcher(table, indices[mask], batch_size, encode_fn=encode_fn)
     return out
 
 
@@ -135,8 +144,8 @@ def _spot_checks() -> None:
     # Sampler structural sanity
     sampler = StratifiedSampler(table, train_idx, seed=42)
     batch = sampler.sample_batch(8000)
-    assert batch["input"].shape == (8000, SEQ_LEN - 1)
-    assert batch["target"].shape == (8000, SEQ_LEN - 1)
+    assert batch["input"].shape == (8000, _BIT_SEQ_LEN - 1)
+    assert batch["target"].shape == (8000, _BIT_SEQ_LEN - 1)
     assert batch["regime_id"].shape == (8000,)
     assert batch["input"][0, 0] == BOS_ID
     assert batch["input"][0, POS_PLUS] == PLUS_ID
