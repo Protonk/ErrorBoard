@@ -11,6 +11,7 @@ __pycache__/
 code/nanoGPT/
 code/bittokens-ref/
 code/fone-ref/
+code/dayval/
 
 # Training outputs (checkpoints, logs, metrics)
 runs/
