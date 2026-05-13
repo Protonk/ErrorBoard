@@ -87,11 +87,30 @@ DEFAULT_RUNS = [
 ]
 
 
+PILOT_RUNS = [
+    ("learned-PE FoNE s0 (L4-E128)", "runs/fone-L4-E128-s0/checkpoint_020000.pt"),
+    ("learned-PE FoNE s1 (L4-E128)", "runs/fone-L4-E128-s1/checkpoint_020000.pt"),
+    ("learned-PE FoNE s2 (L4-E128)", "runs/fone-L4-E128-s2/checkpoint_020000.pt"),
+    ("learned-PE FoNE s3 (L4-E128)", "runs/fone-L4-E128-s3/checkpoint_020000.pt"),
+    ("learned-PE FoNE s4 (L4-E128)", "runs/fone-L4-E128-s4/checkpoint_020000.pt"),
+]
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--out", default="notes/fone_severity_findings.md")
+    p.add_argument("--pilot", action="store_true",
+                   help="Run on the L4-E128 pilot checkpoints (writes to "
+                        "fone_pilot_severity_findings.md).")
     args = p.parse_args()
     repo = _repo_root()
+    if args.pilot:
+        runs = PILOT_RUNS
+        out_path_default = "notes/fone_pilot_severity_findings.md"
+        if args.out == "notes/fone_severity_findings.md":
+            args.out = out_path_default
+    else:
+        runs = DEFAULT_RUNS
 
     sections = [
         "# FoNE severity probe",
@@ -107,7 +126,7 @@ def main() -> None:
         "| ε   | 0.000 | 0.045 | 0.072 | 0.084 | 0.085 | 0.075 | 0.057 | 0.032 |",
     ]
     summary_rows = []
-    for vname, vpath in DEFAULT_RUNS:
+    for vname, vpath in runs:
         print(f"Running {vname}: {vpath}", flush=True)
         out = fone_predict_on_holdout(repo / vpath, device="cpu")
         sev = _fone_severity_from_predictions(out)
