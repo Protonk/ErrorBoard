@@ -1,19 +1,18 @@
-"""FoNE pilot at L4-E128: scale-stability test for the anti-ε sign-flip.
+"""FoNE pilot at L=4 with a configurable n_embd.
 
-The L4-E048 FoNE arm runs at ~112K params — <2% of Zhou's smallest reported
-working scale (8.31M-param 1-layer FoNE). At that capacity, FoNE flips the
-anti-ε severity correlation positive (+0.42, +0.51) where bit/RoPE/SEM all
-sit at -0.7 to -0.92.
+Used to characterize the capacity → anti-ε transition. The original L4-E048
+FoNE arm (112K params) flips anti-ε severity positive; L4-E128 (791K params)
+mostly recovers. Intermediate sizes resolve whether the transition is a
+sharp capacity threshold or a gradual shift in seed distribution.
 
-This pilot tests whether the sign-flip is operation-specific (would survive
-at higher capacity) or a small-model artifact (would soften / reverse with
-more params). L4-E128 is the same depth as the existing arms with 7× the
-parameter count; matched to pentagon V4 for cross-reference.
+d_mlp is set to 4 × n_embd. n_head is held at 4 (so d_head = n_embd / 4).
 
-5 seeds, 20k iters each, learned PE. Run names: `fone-L4-E128-s{0..4}`.
+5 seeds, 20k iters each, learned PE. Run names: `fone-L4-E{NNN}-s{0..4}`.
 
 Usage:
-    python -m errorboard.fone_pilot [--runs-dir runs]
+    python -m errorboard.fone_pilot --n-embd 128             # L4-E128 (original pilot)
+    python -m errorboard.fone_pilot --n-embd 64              # L4-E064 transition point
+    python -m errorboard.fone_pilot --n-embd 96              # L4-E096 transition point
 """
 
 from __future__ import annotations
@@ -31,21 +30,22 @@ def _is_completed(run_dir: Path) -> bool:
     return status_file.exists() and status_file.read_text().strip() == "completed"
 
 
-def run_one(seed: int, runs_dir: str, max_iters: int = 20_000) -> None:
-    run_name = f"fone-L4-E128-s{seed}"
+def run_one(seed: int, n_embd: int, runs_dir: str, max_iters: int = 20_000) -> None:
+    run_name = f"fone-L4-E{n_embd:03d}-s{seed}"
     run_dir = Path(runs_dir) / run_name
     if _is_completed(run_dir):
         print(f"  {run_name}  SKIP (completed)", flush=True)
         return
-    print(f"  === {run_name}  L=4  E=128  seed={seed}  tokenization=fone ===", flush=True)
+    print(f"  === {run_name}  L=4  E={n_embd}  seed={seed}  tokenization=fone ===",
+          flush=True)
     cfg = FoneTrainingConfig(
         run_name=run_name,
         runs_dir=runs_dir,
         seed=seed,
         n_layer=4,
         n_head=4,
-        n_embd=128,
-        d_mlp=512,
+        n_embd=n_embd,
+        d_mlp=4 * n_embd,
         pos_encoding="learned",
         max_iters=max_iters,
     )
@@ -58,16 +58,21 @@ def run_one(seed: int, runs_dir: str, max_iters: int = 20_000) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
+    p.add_argument("--n-embd", type=int, default=128)
     p.add_argument("--runs-dir", default="runs")
     p.add_argument("--max-iters", type=int, default=20_000)
     p.add_argument("--start", type=int, default=0)
     p.add_argument("--end", type=int, default=4)
     args = p.parse_args()
 
+    if args.n_embd % 4 != 0:
+        raise ValueError(f"n_embd must be divisible by 4 (n_head=4), got {args.n_embd}")
+
     t_start = time.time()
-    print(f"\n=== FoNE pilot L4-E128 seeds {args.start}..{args.end} ===\n", flush=True)
+    print(f"\n=== FoNE pilot L4-E{args.n_embd:03d} seeds {args.start}..{args.end} ===\n",
+          flush=True)
     for seed in range(args.start, args.end + 1):
-        run_one(seed, args.runs_dir, args.max_iters)
+        run_one(seed, args.n_embd, args.runs_dir, args.max_iters)
 
     elapsed = time.time() - t_start
     print(f"\nDone in {elapsed:.0f}s ({elapsed / 60:.1f}m)", flush=True)
